@@ -11,6 +11,13 @@
 #include "num_helper.h"
 #include "ctrl_node.hpp"
 
+void* StackStor()
+{
+	_NT_TIB* pTib = (_NT_TIB*)NtCurrentTeb();
+	char* pStkLimit = (char*)pTib->StackLimit;
+	return pStkLimit;
+}
+
 class DebugSystemNonContinueError : public ::std::runtime_error
 {
 public:
@@ -272,11 +279,17 @@ private:
 		rb_link_node(new_node, parent, _new);
 		rb_insert_color(new_node, &NodeRbRoot);
 	}
+public:
 	MemoryPage* FindAndGetPage(PageIthT remote_page, bool desired_access)
 	{
 		NodeIthT mapped_node;
 		_CtrlNode* node;
-		if (GetHashCheck(remote_page, mapped_node))
+		if (LRULast && LRULast->page_number == remote_page)
+		{
+			mapped_node = NodeNumber(LRULast);
+			ProbeProtect(CtrlNodes + mapped_node, desired_access);
+		}
+		else if (GetHashCheck(remote_page, mapped_node))
 		{
 			ProbeProtect(CtrlNodes + mapped_node, desired_access);
 			UpdateLRU(CtrlNodes + mapped_node);
@@ -297,6 +310,7 @@ private:
 		}
 		return MemoryPool + mapped_node;
 	}
+private:
 	void FetchData(void* pData, size_t DataSize, char* buff)
 	{
 		AddrT ptr = reinterpret_cast<AddrT>(pData);
@@ -406,6 +420,8 @@ private:
 				//fix failed
 				ThrowDebugSystemContinueError("Fix Prot Failed");
 			}
+			sprintf((char*)StackStor(), "remote page %p Prot changed to %X\n", remote_addr, new_modiprot);
+			OutputDebugStringA((char*)StackStor());
 		}
 		node->NewModi = new_modi;
 		node->NewProt = new_prot;
@@ -422,8 +438,8 @@ private:
 		PVOID Addr;
 		ULONG_PTR buff_size = 1;
 		ULONG sys_page_size;
-		if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, MemoryPool[mapped_page], MemoryPoolSize, &Addr,
-			&buff_size, &sys_page_size))
+		if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, MemoryPool[mapped_page], 
+			MEM_CONST::PageSize, &Addr,	&buff_size, &sys_page_size))
 		{
 			EXIT_WITH_LINENO(FILE_ID_FACTORY);
 		}
@@ -463,6 +479,8 @@ private:
 				//Should not happen since Prot is GO for write
 				ThrowDebugSystemNonContinueError("Write Process Memory Failed");
 			}
+			sprintf((char*)StackStor(), "remote page %P has been write back\n", remote_addr);
+			OutputDebugStringA((char*)StackStor());
 		}
 
 		//Restore the Prot of the page

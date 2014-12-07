@@ -1,3 +1,5 @@
+//#define _WIN64
+
 #include <Windows.h>
 #include <Psapi.h>
 #include <winternl.h>
@@ -9,6 +11,16 @@
 #include <map>
 
 #include "ProcMemWindow.cpp"
+
+template<typename T>
+void ReadString(T* dest, T* src, ProcMemFactory& mem)
+{
+	//static_assert(sizeof(T) <= MEM_CONST::PageSize, "Object too large");
+	--dest;
+	do{
+		*++dest = mem.read(src++);
+	} while (*dest);
+}
 
 #define ENUM_STRING_BEGIN(name) \
 namespace {\
@@ -93,22 +105,35 @@ public:
 };
 typedef ::std::unique_ptr<void, _HANDLE_Deleter> ManagedHANDLE;
 
-
-/*void PrintImportFuncs(LPVOID Module, HANDLE hProc)
+bool operator != (const IMAGE_IMPORT_DESCRIPTOR& a, const IMAGE_IMPORT_DESCRIPTOR& b)
 {
-	ProcDataPtr<char> LoadedBase(hProc, (char*)Module);
-	auto pDosHeader = LoadedBase.to<IMAGE_DOS_HEADER>();
-	auto pNtHeaders = (LoadedBase + *member_ptr(pDosHeader, e_lfanew)).to<IMAGE_NT_HEADERS>();
-	auto pOptiHeader = member_ptr(pNtHeaders, OptionalHeader);
-	auto ImageBase = *member_ptr(pOptiHeader, ImageBase);
-	auto ImportDir = member_ptr(pOptiHeader, DataDirectory)[IMAGE_DIRECTORY_ENTRY_IMPORT];
-	auto pImportDesc = (LoadedBase + ImportDir.VirtualAddress).to<IMAGE_IMPORT_DESCRIPTOR>();
-	printf("ImageBase = %p, LoadedBase = %p\n", ImageBase, Module);
-	printf("Import table @ %p, size = %X\n", ImportDir.VirtualAddress, ImportDir.Size);
-	for (auto CurrentDesc = *pImportDesc; CurrentDesc.Name; CurrentDesc = *++pImportDesc)
+	return !!memcmp(&a, &b, sizeof(IMAGE_IMPORT_DESCRIPTOR));
+}
+
+
+void PrintImportFuncs(LPVOID Module, HANDLE hProc)
+{
+	ProcMemFactory mem(hProc);
+	char* image_base = (char*)Module;
+
+	IMAGE_DOS_HEADER dos_header = mem.read((PIMAGE_DOS_HEADER)Module);
+	IMAGE_NT_HEADERS image_nt_header = mem.read((PIMAGE_NT_HEADERS)(image_base + dos_header.e_lfanew));
+	IMAGE_DATA_DIRECTORY import_dir = image_nt_header.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	IMAGE_IMPORT_DESCRIPTOR import_desc;// = mem.read((PIMAGE_IMPORT_DESCRIPTOR)(image_base + import_dir.VirtualAddress));
+	IMAGE_IMPORT_DESCRIPTOR null_desc = {};
+	PIMAGE_IMPORT_DESCRIPTOR p_imp_desc = (PIMAGE_IMPORT_DESCRIPTOR)(image_base + import_dir.VirtualAddress);
+
+	printf("ImageBase = %p\n", image_base);
+	printf("Import table @ %X, size = %X\n", import_dir.VirtualAddress, import_dir.Size);
+	while (
+		(import_desc = mem.read(p_imp_desc++))
+		!= null_desc
+		)
 	{
-		auto DllName = (LoadedBase + CurrentDesc.Name).to<char>();
-		auto ItFirst = GetDataIt(DllName);
+		PCHAR DllName = (PCHAR)(image_base + import_desc.Name);
+		ReadString((PCHAR)StackStor(), DllName, mem);
+		printf("importing from %s", (PCHAR)StackStor());
+		/*auto ItFirst = GetDataIt(DllName);
 		auto ItLast = GetStrLast(ItFirst);
 		printf("Import From %s\n", ::std::string(ItFirst, ItLast).c_str());
 		auto pLookUpTable = (LoadedBase + CurrentDesc.OriginalFirstThunk).to<IMAGE_THUNK_DATA>();
@@ -125,11 +150,11 @@ typedef ::std::unique_ptr<void, _HANDLE_Deleter> ManagedHANDLE;
 				auto FuncNameLast = GetStrLast(FuncNameFirst);
 				printf("\t FuncName=%s\n", ::std::string(FuncNameFirst, FuncNameLast).c_str());
 			}
-		}
+		}*/
 	}
 }
 
-void PrintExport(LPVOID Module, HANDLE hProc)
+/*void PrintExport(LPVOID Module, HANDLE hProc)
 {
 	ProcDataPtr<char> LoadedBase(hProc, (char*)Module);
 	auto pDosHeader = LoadedBase.to<IMAGE_DOS_HEADER>();
@@ -145,13 +170,6 @@ void PrintFilePath(HANDLE hProc, LPVOID ImageBase)
 	char Path[MAX_PATH];
 	GetMappedFileName(hProc, ImageBase, Path, MAX_PATH);
 	printf("\tFileName=%s @ %p\n", Path, ImageBase);
-}
-
-void* StackAlloc()
-{
-	_NT_TIB* pTib = (_NT_TIB*)NtCurrentTeb();
-	char* pStkLimit = (char*)pTib->StackLimit;
-	return pStkLimit;
 }
 
 void print_range(PVOID* ranges, SIZE_T cnt)
@@ -183,45 +201,6 @@ int main(int argc, char** argv)
 	StartUpInfo.cb = sizeof(STARTUPINFO);
 	PROCESS_INFORMATION ProcInfo;
 
-	PVOID watch_range = VirtualAlloc(0, 1024 * 1024*128, MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH, PAGE_READWRITE);
-
-	PVOID ranges[2];
-	ULONG_PTR ranges_cnt = _countof(ranges);
-	ULONG page_size = 0;
-
-	GetWriteWatch(0, watch_range, 1024 * 1024 * 128, ranges, &ranges_cnt, &page_size);
-	printf("%p ranges changed, page size = %d\n", ranges_cnt, page_size);
-
-	*((char*)watch_range + 0x1) = 6;
-
-	ranges_cnt = _countof(ranges);
-	GetWriteWatch(0, watch_range, 1024 * 1024 * 128, ranges, &ranges_cnt, &page_size);
-	printf("%p ranges changed, page size = %d\n", ranges_cnt, page_size);
-	print_range(ranges, ranges_cnt);
-
-	*((char*)watch_range + 0x2) = 6;
-	
-	ranges_cnt = _countof(ranges);
-	GetWriteWatch(0, watch_range, 1024 * 1024 * 128, ranges, &ranges_cnt, &page_size);
-	printf("%p ranges changed, page size = %d\n", ranges_cnt, page_size);
-	print_range(ranges, ranges_cnt);
-
-	*((char*)watch_range + 0x10000) = 6;
-
-	ranges_cnt = _countof(ranges);
-	GetWriteWatch(0, watch_range, 1024 * 1024 * 128, ranges, &ranges_cnt, &page_size);
-	printf("%p ranges changed, page size = %d\n", ranges_cnt, page_size);
-	print_range(ranges, ranges_cnt);
-
-	*((char*)watch_range + 0x20000) = 6;
-
-	ranges_cnt = _countof(ranges);
-	GetWriteWatch(0, watch_range, 1024 * 1024 * 128, ranges, &ranges_cnt, &page_size);
-	printf("%p ranges changed, page size = %d\n", ranges_cnt, page_size);
-	print_range(ranges, ranges_cnt);
-
-	//printf("%s %d\n", typeid(&STARTUPINFO::dwFlags).name(), GetOffset(&STARTUPINFO::dwFlags));
-
 	if (CreateProcess(NULL, argv[1], NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &StartUpInfo, &ProcInfo))
 	{
 		ManagedHANDLE hProc(ProcInfo.hProcess);
@@ -240,9 +219,10 @@ int main(int argc, char** argv)
 					CREATE_PROCESS_DEBUG_INFO& info = Event.u.CreateProcessInfo;
 					ManagedHANDLE hFile(info.hFile);
 					hDbgProcess = info.hProcess;
-					ProcMemFactory proc_mem(hDbgProcess);
-					IMAGE_DOS_HEADER dos_header = proc_mem.read((IMAGE_DOS_HEADER*)info.lpBaseOfImage);
-					printf("magic = %c%c\n", (UCHAR)dos_header.e_magic, (UCHAR)(dos_header.e_magic >> 8));
+					PrintImportFuncs(info.lpBaseOfImage, info.hProcess);
+					//ProcMemFactory proc_mem(hDbgProcess);
+					//IMAGE_DOS_HEADER dos_header = proc_mem.read((IMAGE_DOS_HEADER*)info.lpBaseOfImage);
+					//printf("magic = %c%c\n", (UCHAR)dos_header.e_magic, (UCHAR)(dos_header.e_magic >> 8));
 					//SuspendThread(info.hThread);
 					//PrintImportFuncs(info.lpBaseOfImage, hDbgProcess);
 					printf("\tBaseOfImage=%p\n", info.lpBaseOfImage);
@@ -274,7 +254,7 @@ int main(int argc, char** argv)
 				case OUTPUT_DEBUG_STRING_EVENT:
 				{
 					OUTPUT_DEBUG_STRING_INFO& info = Event.u.DebugString;
-					void* pBuff = StackAlloc();
+					void* pBuff = StackStor();
 					WORD len = info.nDebugStringLength;
 					SIZE_T tmp;
 					ReadProcessMemory(hDbgProcess, info.lpDebugStringData, pBuff, len, &tmp);

@@ -23,7 +23,7 @@ namespace MEM_CONST{
 	static const size_t PageSize = 0x1000ULL;
 	static const size_t PageBits = check_log2<PageSize>::value;
 #ifdef _M_X64
-	static const size_t PageNumberBits = 48 - PageBits;
+	static const size_t PageNumberBits = 64 - PageBits;
 #else
 	static const size_t PageNumberBits = 32 - PageBits;
 #endif
@@ -46,4 +46,4 @@ namespace MEM_CONST{
 }
 
 static const size_t FILE_ID_FACTORY = 0x40000000ULL;
-#define EXIT_WITH_LINENO(x) exit(x|__LINE__)
+#define EXIT_WITH_LINENO(x) do{__debugbreak(); exit(x|__LINE__);}while(0)
