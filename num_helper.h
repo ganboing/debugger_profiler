@@ -121,7 +121,7 @@ unsigned long check_scan_bit32(unsigned long value)
 	unsigned long pos;
 	if (!_BitScanForward(&pos, value))
 	{
-		EXIT_WITH_LINENO(FILE_ID_FACTORY);
+		exit(__LINE__);
 	}
 	return pos;
 }

@@ -1,6 +1,7 @@
 //#define _WIN64
 
 #include <Windows.h>
+#include <intrin.h>
 #include <Psapi.h>
 #include <winternl.h>
 #include <cstdio>
@@ -11,6 +12,24 @@
 #include <map>
 
 #include "ProcMemWindow.cpp"
+bool _init_by_tls()
+{
+	OutputDebugStringA("tls");
+	return true;
+}
+
+/*class TLS_Var{
+public:
+TLS_Var(){
+OutputDebugStringA("tls");
+}
+~TLS_Var()
+{
+OutputDebugStringA("~tls");
+}
+};
+_declspec(thread) TLS_Var tls_var;*/
+_declspec(thread) bool tls_var = _init_by_tls();
 
 template<typename T>
 void ReadString(T* dest, T* src, ProcMemFactory& mem)
@@ -179,15 +198,6 @@ void print_range(PVOID* ranges, SIZE_T cnt)
 		printf("\t %p \n", ranges[i]);
 	}
 }
-
-/*void PrintRangeChanged(void* base, size_t size)
-{
-	void* ranges[2];
-	unsigned long range_buff_cnt;
-	do{
-
-	} while (range_buff_cnt);
-}*/
 
 int main(int argc, char** argv)
 {

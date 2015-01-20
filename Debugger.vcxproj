@@ -214,7 +214,7 @@ copy /Y $(ProjectDir)\main.cpp z:\backup\</Command>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>false</OptimizeReferences>
+      <OptimizeReferences>true</OptimizeReferences>
       <HeapReserveSize>
       </HeapReserveSize>
       <HeapCommitSize>
@@ -222,6 +222,7 @@ copy /Y $(ProjectDir)\main.cpp z:\backup\</Command>
       <StackReserveSize>2097152</StackReserveSize>
       <StackCommitSize>2097152</StackCommitSize>
       <AdditionalDependencies>Psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions> %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y $(TargetPath) z:\backup\

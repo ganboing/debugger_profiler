@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "num_helper.h"
 
 template<size_t N>
 struct check_log2;
@@ -22,11 +23,7 @@ struct check_log2 : check_log2<!(N % 2)>{
 namespace MEM_CONST{
 	static const size_t PageSize = 0x1000ULL;
 	static const size_t PageBits = check_log2<PageSize>::value;
-#ifdef _M_X64
-	static const size_t PageNumberBits = 64 - PageBits;
-#else
-	static const size_t PageNumberBits = 32 - PageBits;
-#endif
+	static const size_t PageNumberBits = bitsof<uintptr_t>::value - PageBits;
 	static const size_t MyMemProtBits = 8;
 	static const size_t MyMemProtRWBits = 4;
 	static const size_t MyMemProtMask = 0xff;
@@ -42,7 +39,8 @@ namespace MEM_CONST{
 	static const size_t MY_PAGE_GUARD_BIT				= check_log2<(PAGE_GUARD>>MyMemProtBits)>::value;
 	static const size_t MY_PAGE_NOCACHE_BIT				= check_log2<(PAGE_NOCACHE>>MyMemProtBits)>::value;
 	static const size_t MY_PAGE_WRITECOMBINE_BIT		= check_log2<(PAGE_WRITECOMBINE>>MyMemProtBits)>::value; 
-	static const size_t MY_PAGE_NULL_MODIFIER_BIT		= 3;
+	static const size_t MY_PAGE_NULL_MODIFIER_BIT		= MY_PAGE_WRITECOMBINE_BIT + 1;
+	static const size_t MyMemModiMask = ((size_t(1) << MY_PAGE_NULL_MODIFIER_BIT) - 1) << MyMemProtBits;
 }
 
 static const size_t FILE_ID_FACTORY = 0x40000000ULL;

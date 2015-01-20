@@ -1,9 +1,10 @@
 //#include <Windows.h>
 #define _CRTDBG_MAP_ALLOC
+#include <stdint.h>
 #include <map>
 #include <algorithm>
-#include <stdint.h>
 #include <string>
+#include <bitset>
 #include <exception>
 #include <cassert>
 #include <Windows.h> 
@@ -21,13 +22,13 @@ void* StackStor()
 class DebugSystemNonContinueError : public ::std::runtime_error
 {
 public:
-	DebugSystemNonContinueError(const char* msg) : runtime_error(msg){}
+	DebugSystemNonContinueError(const char* msg) : ::std::runtime_error(msg){}
 };
 
-class DebugSystemContinueError : public DebugSystemNonContinueError
+class DebugSystemContinueError : public ::std::runtime_error
 {
 public:
-	DebugSystemContinueError(const char* msg) : DebugSystemNonContinueError(msg){}
+	DebugSystemContinueError(const char* msg) : ::std::runtime_error(msg){}
 };
 
 #if _HAS_EXCEPTIONS
@@ -66,11 +67,10 @@ __forceinline static void SplitModiProt(DWORD modiprot, size_t& modi, size_t& pr
 
 __forceinline static DWORD CatModiProt(size_t modi, size_t prot)
 {
-	DWORD ret = DWORD(1) << prot;
-	if (modi != MEM_CONST::MY_PAGE_NULL_MODIFIER_BIT)
-	{
-		ret |= DWORD(1) << (modi + MEM_CONST::MyMemProtBits);
-	}
+	DWORD ret = DWORD(1) << modi;
+	ret <<= MEM_CONST::MyMemProtBits;
+	ret &= MEM_CONST::MyMemModiMask;
+	ret |= DWORD(1) << prot;
 	return ret;
 }
 
@@ -84,6 +84,8 @@ MemoryPage* AllocMemoryWatchPool(size_t page_count)
 	{
 		ThrowDebugSystemNonContinueError("Memory Pool Allocation Failed");
 	}
+	sprintf((char*)StackStor(), "Mempool Allocated at %p\n", ret);
+	OutputDebugStringA((char*)StackStor());
 	return reinterpret_cast<MemoryPage*>(ret);
 }
 
@@ -104,7 +106,7 @@ class ProcMemFactory
 	*/
 	/*
 	Hash Algo:
-	0            12           24      31
+	0            12           24      31/63
 	[------------|------------|--------]
 	[ PageOffset |       PageNumber    ]
 	[ HashEnt]
@@ -113,7 +115,7 @@ class ProcMemFactory
 	static const size_t NodeSlotNumberBits = check_log2<NodeSlotNumber>::value;
 	static const size_t MemoryPoolSize = NodeSlotNumber* MEM_CONST::PageSize;
 
-	static const size_t HashTabSize = 0x400ULL;
+	static const size_t HashTabSize = 0x40ULL;
 	static const size_t HashTabSizeBits = check_log2<HashTabSize>::value;
 
 	static const size_t HashEntTagBits = MEM_CONST::PageNumberBits - HashTabSizeBits;
@@ -122,18 +124,15 @@ class ProcMemFactory
 	static const size_t MapRatio = NodeSlotNumber / HashTabSize;
 	static const size_t MapRatioBits = check_log2<MapRatio>::value;
 
-	union HashTabEnt{
-		uintptr_t _v;
-		struct{
-			uintptr_t Inv : 1;
-			uintptr_t Tag : HashEntTagBits;
-			uintptr_t Val : HashEntValBits;
-		};
+	struct HashTabEnt{
+		uintptr_t Tag : HashEntTagBits;
+		uintptr_t Val : HashEntValBits;
 	};
 
 	static_assert(sizeof(HashTabEnt) == sizeof(uintptr_t), "check HashTabEnt size, Ratio too high");
+	// The maximum ratio equals page size
 
-	static const size_t HashTabEntBits = HashEntTagBits + HashEntValBits + 1;
+	static const size_t HashTabEntBits = HashEntTagBits + HashEntValBits;
 
 private:
 	typedef size_t NodeIthT;
@@ -149,6 +148,8 @@ private:
 	_CtrlNode::RootTy NodeRbRoot;
 	_CtrlNode CtrlNodes[NodeSlotNumber];
 	HashTabEnt HashTab[HashTabSize];
+	::std::bitset<HashTabSize> HashValid;
+	bool Disabled;
 public:
 	ProcMemFactory(HANDLE _hProc)
 		:
@@ -156,18 +157,30 @@ public:
 		MemoryPool(AllocMemoryWatchPool(NodeSlotNumber)),
 		LRUFirst(nullptr),
 		LRULast(nullptr),
-		AvailSlotsHead(CtrlNodes)
+		AvailSlotsHead(CtrlNodes),
+		Disabled(false)
 	{
 		//static const size_t sizeof_ctrl_nodes = sizeof(CtrlNodes);
 		static_assert(sizeof(CtrlNodes) == sizeof(_CtrlNode) *NodeSlotNumber, "check Nodes size");
 		static_assert(sizeof(HashTab) == HashTabSize * sizeof(uintptr_t), "check Nodes size");
-		memset(HashTab, 0, sizeof(HashTab));
 		memset(CtrlNodes, 0, sizeof(CtrlNodes));
 		init_node_list(CtrlNodes);
 	}
 	~ProcMemFactory()
 	{
-		Update();
+		//Check if the factory is valid
+		if (!Disabled)
+		{
+			try{
+				Update();
+			}
+			catch (::std::exception& e)
+			{
+				OutputDebugStringA("dtor ProcMemFactory failed: ");
+				OutputDebugStringA(e.what());
+			}
+			//do not allow exceptions escape from dtor
+		}
 		DeallocMemoryWatchPool(MemoryPool);
 	}
 private:	
@@ -179,7 +192,7 @@ private:
 	{
 		HashIthT hash_slot = _hash_map_func<HashTabSizeBits>(page_number);
 		PageIthT real_tag = page_number >> HashTabSizeBits;
-		if (HashTab[hash_slot].Inv && HashTab[hash_slot].Tag == real_tag)
+		if (HashValid[hash_slot] && HashTab[hash_slot].Tag == real_tag)
 		{
 			node_number = HashTab[hash_slot].Val;
 			return true;
@@ -190,7 +203,7 @@ private:
 	{
 		HashIthT hash_slot = _hash_map_func<HashTabSizeBits>(page_number);
 		PageIthT real_tag = page_number >> HashTabSizeBits;
-		if (HashTab[hash_slot].Inv)
+		if (HashValid[hash_slot])
 		{
 			if (HashTab[hash_slot].Tag == real_tag)
 			{
@@ -198,7 +211,7 @@ private:
 				{
 					EXIT_WITH_LINENO(FILE_ID_FACTORY);
 				}
-				HashTab[hash_slot].Inv = 0;
+				HashValid[hash_slot] = false;
 			}
 		}
 	}
@@ -206,7 +219,7 @@ private:
 	{
 		HashIthT hash_slot = _hash_map_func<HashTabSizeBits>(page_number);
 		PageIthT real_tag = page_number >> HashTabSizeBits;
-		HashTab[hash_slot].Inv = 1;
+		HashValid[hash_slot] = true;
 		HashTab[hash_slot].Tag = real_tag;
 		HashTab[hash_slot].Val = mapped_node;
 	}
@@ -280,35 +293,47 @@ private:
 		rb_insert_color(new_node, &NodeRbRoot);
 	}
 public:
-	MemoryPage* FindAndGetPage(PageIthT remote_page, bool desired_access)
+	MemoryPage* FindAndGetPage(PageIthT remote_page, uintptr_t desired_access)
 	{
-		NodeIthT mapped_node;
-		_CtrlNode* node;
-		if (LRULast && LRULast->page_number == remote_page)
+		if (Disabled)
 		{
-			mapped_node = NodeNumber(LRULast);
-			ProbeProtect(CtrlNodes + mapped_node, desired_access);
+			throw DebugSystemNonContinueError("Factory disabled by previous exception");
 		}
-		else if (GetHashCheck(remote_page, mapped_node))
+		try
 		{
-			ProbeProtect(CtrlNodes + mapped_node, desired_access);
-			UpdateLRU(CtrlNodes + mapped_node);
+			NodeIthT mapped_node;
+			_CtrlNode* node;
+			if (LRULast && LRULast->page_number == remote_page)
+			{
+				mapped_node = NodeNumber(LRULast);
+				UpdateProtect(CtrlNodes + mapped_node, desired_access);
+			}
+			else if (GetHashCheck(remote_page, mapped_node))
+			{
+				UpdateProtect(CtrlNodes + mapped_node, desired_access);
+				UpdateLRU(CtrlNodes + mapped_node);
+			}
+			else if ((node = GetRb(remote_page)))
+			{
+				UpdateProtect(node, desired_access);
+				mapped_node = NodeNumber(node);
+				UpdateHashTab(remote_page, mapped_node);
+				UpdateLRU(node);
+			}
+			else
+			{
+				//Should be fetched
+				mapped_node = FetchNewPage(remote_page, desired_access);
+				UpdateHashTab(remote_page, mapped_node);
+				InsertLRU(CtrlNodes + mapped_node);
+			}
+			return MemoryPool + mapped_node;
 		}
-		else if ((node = GetRb(remote_page)))
+		catch (DebugSystemNonContinueError&)
 		{
-			ProbeProtect(node, desired_access);
-			mapped_node = NodeNumber(node);
-			UpdateHashTab(remote_page, mapped_node);
-			UpdateLRU(node);
+			Disabled = true;
+			throw;
 		}
-		else
-		{
-			//Should be fetched
-			mapped_node = FetchNewPage(remote_page, desired_access);
-			UpdateHashTab(remote_page, mapped_node);
-			InsertLRU(CtrlNodes + mapped_node);
-		}
-		return MemoryPool + mapped_node;
 	}
 private:
 	void FetchData(void* pData, size_t DataSize, char* buff)
@@ -363,7 +388,7 @@ private:
 			++current_page;
 		}
 	}
-	void GetProtect(_RbCtrlNode* node)
+	void GetRequestProtect(_RbCtrlNode* node, uintptr_t desired_access)
 	{
 		size_t curr_modi;
 		size_t curr_prot;
@@ -390,29 +415,53 @@ private:
 			EXIT_WITH_LINENO(FILE_ID_FACTORY);
 		}
 		SplitModiProt(mem_info.Protect, curr_modi, curr_prot);
-		node->NewModi = node->OldModi = curr_modi;
-		node->NewProt = node->OldProt = curr_prot;
-	}
-	void ProbeProtect(_RbCtrlNode* node, bool desired_access)
-	{
+		node->OldModi = curr_modi;
+		node->OldProt = curr_prot;
+
 		bool needs_fix = false;
-		size_t new_modi = node->NewModi;
-		size_t new_prot = node->NewProt;
-		LPVOID remote_addr = (LPVOID)(node->page_number << MEM_CONST::PageBits);
-		if (new_modi == MEM_CONST::MY_PAGE_GUARD_BIT)
+		if (curr_modi == MEM_CONST::MY_PAGE_GUARD_BIT)
 		{
 			//The Guard Property is removed
-			new_modi = MEM_CONST::MY_PAGE_NULL_MODIFIER_BIT;
+			curr_modi = MEM_CONST::MY_PAGE_NULL_MODIFIER_BIT;
 			needs_fix = true;
 		}
-		if (new_prot % MEM_CONST::MyMemProtRWBits <= size_t(desired_access))
+		if (curr_prot % MEM_CONST::MyMemProtRWBits <= size_t(desired_access))
 		{
 			//Elevate the Prot Level
-			new_prot = size_t(desired_access) + 1;
+			curr_prot = size_t(desired_access) + 1;
 			needs_fix = true;
 		}
 		if (needs_fix)
 		{
+			DWORD new_modiprot = CatModiProt(curr_modi, curr_prot);
+			DWORD tmp;
+			if (!VirtualProtectEx(hProc, remote_addr, MEM_CONST::PageSize, new_modiprot, &tmp))
+			{
+				//fix failed
+				ThrowDebugSystemContinueError("Fix Prot Failed");
+			}
+			sprintf((char*)StackStor(), "remote page %p Prot changed to %X (First time)\n", remote_addr, new_modiprot);
+			OutputDebugStringA((char*)StackStor());
+		}
+		node->level = desired_access;
+	}
+	void UpdateProtect(_RbCtrlNode* node, uintptr_t desired_access)
+	{
+		if (node->level < desired_access)
+		{
+			size_t new_modi = node->OldModi;
+			size_t new_prot = node->OldProt;
+			LPVOID remote_addr = (LPVOID)(node->page_number << MEM_CONST::PageBits);
+			if (new_modi == MEM_CONST::MY_PAGE_GUARD_BIT)
+			{
+				//The Guard Property is removed
+				new_modi = MEM_CONST::MY_PAGE_NULL_MODIFIER_BIT;
+			}
+			if (new_prot % MEM_CONST::MyMemProtRWBits <= size_t(desired_access))
+			{
+				//Elevate the Prot Level
+				new_prot = size_t(desired_access) + 1;
+			}
 			DWORD new_modiprot = CatModiProt(new_modi, new_prot);
 			DWORD tmp;
 			if (!VirtualProtectEx(hProc, remote_addr, MEM_CONST::PageSize, new_modiprot, &tmp))
@@ -422,9 +471,9 @@ private:
 			}
 			sprintf((char*)StackStor(), "remote page %p Prot changed to %X\n", remote_addr, new_modiprot);
 			OutputDebugStringA((char*)StackStor());
+			
+			node->level = desired_access;
 		}
-		node->NewModi = new_modi;
-		node->NewProt = new_prot;
 	}
 	void ResetDirtyFlag(NodeIthT mapped_page)
 	{
@@ -456,6 +505,21 @@ private:
 			CtrlNodes[mapped_page].dirty = 1;
 		}
 	}
+	void RestoreProt(_RbCtrlNode* node)
+	{
+		LPVOID remote_addr = (LPVOID)(node->page_number << MEM_CONST::PageBits);
+		if (node->OldModi == MEM_CONST::MY_PAGE_GUARD_BIT ||
+			(node->OldProt % MEM_CONST::MyMemProtRWBits) <= node->level)
+		{
+			//Restore the Prot of the page
+			DWORD orig_modiprot = CatModiProt(node->OldModi, node->OldProt);
+			DWORD tmp;
+			if (!VirtualProtectEx(hProc, remote_addr, MEM_CONST::PageSize, orig_modiprot, &tmp))
+			{
+				ThrowDebugSystemNonContinueError("Restore Prot Failed");
+			}
+		}
+	}
 	void FlushPage(_RbCtrlNode* node)
 	{
 		LPVOID remote_addr = (LPVOID)(node->page_number << MEM_CONST::PageBits);
@@ -463,9 +527,9 @@ private:
 		if (node->dirty)
 		{
 			node->dirty = 0;
-			if (node->NewProt % MEM_CONST::MyMemProtRWBits < MEM_CONST::MY_PAGE_READWRITE_BIT)
+			if (!node->level)
 			{
-				//Should not happen since NO write is allowed
+				//Should not happen since NO write is issued
 				//Perhaps the Pool is being corrupted.
 				EXIT_WITH_LINENO(FILE_ID_FACTORY);
 			}
@@ -482,27 +546,13 @@ private:
 			sprintf((char*)StackStor(), "remote page %P has been write back\n", remote_addr);
 			OutputDebugStringA((char*)StackStor());
 		}
-
-		//Restore the Prot of the page
-		if (node->NewModi != node->OldModi || node->NewProt != node->OldProt)
-		{
-			DWORD orig_modiprot = CatModiProt(node->OldModi, node->OldProt);
-			DWORD tmp;
-			if (!VirtualProtectEx(hProc, remote_addr, MEM_CONST::PageSize, orig_modiprot, &tmp))
-			{
-				ThrowDebugSystemNonContinueError("Restore Prot Failed");
-			}
-			node->NewModi = node->OldModi;
-			node->NewProt = node->OldProt;
-		}
 	}
-	NodeIthT FetchNewPage(PageIthT remote_page, bool desired_access) //returns node number
+	NodeIthT FetchNewPage(PageIthT remote_page, uintptr_t desired_access) //returns node number
 	{
 		_RbCtrlNode tmp_ctrl_node;
 		tmp_ctrl_node.page_number = remote_page;
 		tmp_ctrl_node.dirty = 0;
-		GetProtect(&tmp_ctrl_node);
-		ProbeProtect(&tmp_ctrl_node, desired_access);
+		GetRequestProtect(&tmp_ctrl_node, desired_access);
 		
 		_CtrlNode* node = GetOneAvail();
 		if (!node){
@@ -546,6 +596,7 @@ private:
 		{
 			InvHashTab(node->page_number, NodeNumber(node));
 			FlushPage(node);
+			RestoreProt(node);
 		}
 		move_si_to_other(LRUFirst, LRULast, AvailSlotsHead);
 		NodeRbRoot.rb_node = nullptr;
@@ -607,61 +658,5 @@ public:
 	}*/
 };
 
-//static const size_t size_of_memory_factory = bitsof<ProcMemFactory>::value / 8;
-
-
-	//a[6].parent() = a[4].prev();
-
-
-	
-
-	//auto p = factory.GetVarPtr((char*)nullptr);
-	//char t = *p;
-	//char* f;
-	//factory.GetVarPtr(f);
-	//rb_insert_color(a + 5, &_RbRoot);
-	//rb_set_parent(a[1].rb_parent(), a[5].rb_parent());
-	//rb_set_parent_color(a[6].list_next(), a[4].list_prev(), 1);
-	//rb_link_node(a[4].list_next(), a[8].list_prev(), &a[9].rb_left());
-	//a[1].next();
-	//a[1].parent()->color = 0;
-	//&a[1].parent();
-	//const _CtrlNode* b = a;
-	//b[1].parent()._get_const();
-	//b[2].parent()->rb_right();
-	//b[2].parent() == b + 7;
-	//b[2].rb_right() == a[7].next();
-	//a[7].parent() == a[8].rb_left();
-	//a[8].rb_right() == a + 7;
-	//a[9].rb_right() = b[4].rb_left();
-	//_CtrlNode::pptr c;
-	//_CtrlNode::cpptr d;
-	//c = &(a[1].next());
-	//d = &(a[3].prev());
-
-	//__rb_rotate_left(a + 5, &_RbRoot);
-	//rb_insert_color(a + 4, &_RbRoot);
-	//__rb_erase_color(a + 6, a + 4, &_RbRoot);
-	//rb_prev(a + 6);
-	//rb_first(&_RbRoot);
-	//rb_erase(a + 4, &_RbRoot);
-
-	//rb_replace_node(a + 6, a + 9, &_RbRoot);
-	//rb_link_node(a + 6, a + 2, &a[3].parent());
-	//if (a[2].rb_parent() == a + 1)
-	//{
-	//	a[4].rb_parent() = a + 6;
-	//}
-	//a[4].list_next() = a[5].list_next();
-	//a->rb_parent()->rb_left()->rb_right() = a + 6;
-
-	//_DataNode<int>::ptr* r = &(a->list_next());
-	//_DataNode<int>::ptr k = a->rb_left();
-	//auto pl = a[6].rb_left();
-	//pl = (a + 5)->list_next();
-	
-	//pl->rb_right()->rb_parent() = a[8].rb_left();
-	//_DataNode<int>::ptr* p = &pl;
-	//rb_link_node(a + 5, a + 7, p);
 
 

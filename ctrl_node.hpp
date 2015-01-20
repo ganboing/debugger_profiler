@@ -4,12 +4,11 @@
 class _CtrlNode;
 
 struct _RbCtrlNode{
-	uintptr_t NewProt : 3;
-	uintptr_t OldProt : 3;
+	uintptr_t level : 1;
 	uintptr_t color : 1;
 	uintptr_t dirty : 1;
-	uintptr_t NewModi : 2;
 	uintptr_t OldModi : 2;
+	uintptr_t OldProt : 3;
 	uintptr_t page_number : MEM_CONST::PageNumberBits;
 };
 static_assert(sizeof(_RbCtrlNode) == sizeof(uintptr_t), "check _RbNode size");
